@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UMA Mebel - Bulk Product Uploader</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-100 p-8">
+    <div class="max-w-2xl mx-auto bg-white p-8 rounded-xl shadow-lg">
+        <h1 class="text-2xl font-bold mb-6 text-gray-800">🛠️ Import Products & Photos</h1>
+
+        <div class="space-y-6">
+            <!-- Credentials -->
+            <div class="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                <h3 class="font-semibold text-blue-900 mb-2">1. Supabase Connection</h3>
+                <div class="space-y-3">
+                    <input type="text" id="supaUrl" placeholder="Project URL (https://xyz.supabase.co)"
+                        class="w-full p-2 border rounded" value="https://qdyhaeshjvsdwqvtrmdr.supabase.co">
+                    <input type="password" id="supaKey" placeholder="Anon Public Key" class="w-full p-2 border rounded">
+                </div>
+            </div>
+
+            <!-- Files -->
+            <div class="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                <h3 class="font-semibold text-gray-900 mb-2">2. Select Files</h3>
+                <div class="space-y-3">
+                    <div>
+                        <label class="block text-sm mb-1">Excel File</label>
+                        <input type="file" id="excelFile" accept=".xlsx, .xls" class="w-full">
+                    </div>
+                    <div>
+                        <label class="block text-sm mb-1">Photos Folder (Select all files inside)</label>
+                        <input type="file" id="photoFiles" multiple webkitdirectory directory class="w-full">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Action -->
+            <button onclick="startUpload()" id="btnStart"
+                class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg transition">
+                Start Import
+            </button>
+
+            <!-- Logs -->
+            <div id="logs"
+                class="bg-black text-green-400 p-4 rounded-lg h-64 overflow-y-auto font-mono text-sm whitespace-pre-wrap hidden">
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const log = (msg) => {
+            const el = document.getElementById('logs');
+            el.classList.remove('hidden');
+            el.textContent += msg + '\n';
+            el.scrollTop = el.scrollHeight;
+            console.log(msg);
+        };
+
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        async function startUpload() {
+            const url = document.getElementById('supaUrl').value;
+            const key = document.getElementById('supaKey').value;
+            const excelInput = document.getElementById('excelFile');
+            const photoInput = document.getElementById('photoFiles');
+
+            if (!url || !key) return alert("Please enter URL and Key");
+            if (!excelInput.files[0]) return alert("Please select Excel file");
+
+            document.getElementById('btnStart').disabled = true;
+            document.getElementById('btnStart').innerText = "Importing...";
+            log("Initializing Supabase...");
+
+            const supabase = window.supabase.createClient(url, key);
+
+            // Read Excel
+            log("Reading Excel...");
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+                    log(`Found ${rows.length} rows.`);
+
+                    // Map photos
+                    const photoMap = {};
+                    if (photoInput.files) {
+                        for (let f of photoInput.files) {
+                            photoMap[f.name] = f;
+                        }
+                        log(`Loaded ${Object.keys(photoMap).length} photos.`);
+                    }
+
+                    // Process Rows
+                    let count = 0;
+                    for (let i = 1; i < rows.length; i++) {
+                        const row = rows[i];
+                        const article = row[0];
+                        const name = row[1];
+                        const price = row[6];
+
+                        if (!article || !name) continue;
+                        if (String(article).includes("Производитель")) continue;
+
+                        log(`Processing [${article}] ${name}...`);
+
+                        let imageUrl = null;
+                        const cleanArticle = String(article).trim();
+                        const cleanName = String(name).trim();
+
+                        // Find photo
+                        const extensions = ['.jpg', '.jpeg', '.png', '.JPG'];
+                        let photoFile = null;
+                        let photoName = null;
+
+                        // Try Article
+                        for (let ext of extensions) {
+                            if (photoMap[`${cleanArticle}${ext}`]) {
+                                photoFile = photoMap[`${cleanArticle}${ext}`];
+                                photoName = `${cleanArticle}${ext}`; // Use article for cleaner filenames
+                                break;
+                            }
+                        }
+                        // Try Name if not found
+                        if (!photoFile) {
+                            for (let ext of extensions) {
+                                if (photoMap[`${cleanName}${ext}`]) {
+                                    photoFile = photoMap[`${cleanName}${ext}`];
+                                    photoName = `${cleanArticle}${ext}`; // Rename to Article.ext for consistency
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Upload Photo
+                        if (photoFile) {
+                            log(`  Found photo file, uploading...`);
+                            const { data, error } = await supabase.storage
+                                .from('products')
+                                .upload(photoName, photoFile, { upsert: true });
+
+                            if (error) {
+                                log(`  ❌ Upload Error: ${error.message}`);
+                            } else {
+                                const { data: urlData } = supabase.storage.from('products').getPublicUrl(photoName);
+                                imageUrl = urlData.publicUrl;
+                                log(`  ✅ Uploaded.`);
+                            }
+                        }
+
+                        // Insert Data
+                        const { error: dbError } = await supabase.from('products').insert({
+                            article: String(article),
+                            name: String(name),
+                            price: Number(price) || 0,
+                            category: 'Каталог',
+                            image_url: imageUrl
+                        });
+
+                        if (dbError) {
+                            log(`  ❌ DB Error: ${dbError.message}`);
+                        } else {
+                            count++;
+                            log(`  ✅ Saved.`);
+                        }
+
+                        // Small delay to prevent rate limits
+                        if (i % 10 === 0) await sleep(500);
+                    }
+
+                    log(`\n🎉 DONE! Imported ${count} products.`);
+                    alert("Import Complete!");
+
+                } catch (err) {
+                    log(`CRITICAL ERROR: ${err.message}`);
+                    console.error(err);
+                } finally {
+                    document.getElementById('btnStart').disabled = false;
+                    document.getElementById('btnStart').innerText = "Start Import";
+                }
+            };
+            reader.readAsArrayBuffer(excelInput.files[0]);
+        }
+    </script>
+</body>
+
+</html>
